@@ -24,6 +24,38 @@ Everything lives in one SQLite file (`data/leads.db` by default) -- leads,
 per-request logs, checkpoints, and the cost ledger. No external infra
 required; that's deliberate given the budget.
 
+## EC2 setup (if starting from scratch)
+
+1. **Launch an instance**: AWS Console -> EC2 -> Launch Instance. Ubuntu
+   Server 24.04 LTS, `t3.small` (2GB RAM; bump to `t3.medium` if Chromium
+   runs out of memory with several concurrent sessions), a new key pair,
+   security group allowing SSH (22) from **your IP only**, 20GiB gp3
+   storage (default 8GB is tight once Chromium + logs + the DB are on it).
+2. **Connect**: `chmod 400 key.pem && ssh -i key.pem ubuntu@<public IP>`
+3. **Install and clone**:
+   ```bash
+   sudo apt update && sudo apt upgrade -y
+   sudo apt install -y python3 python3-venv python3-pip git
+   git clone https://github.com/KindnessofGod/webleadscraper2.0
+   cd webleadscraper2.0 && git checkout claude/nigeria-leadgen-pipeline-spec-kdnhd3
+   python3 -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
+   playwright install --with-deps chromium   # --with-deps installs the system libs Chromium needs to launch headless
+   ```
+4. **Elastic IP (do this if you'll stop/start the instance between runs)**:
+   by default, stopping and restarting an EC2 instance assigns it a *new*
+   public IP. If you're using Webshare (whose Free plan whitelists exactly
+   one IP) or any provider with IP-based access control, that silently
+   breaks your proxy access again after every restart -- the same 407 you'd
+   get from a never-whitelisted IP. Allocate a free Elastic IP (EC2 console
+   -> Elastic IPs -> Allocate) and associate it with the instance so the IP
+   never changes; only re-whitelist once.
+5. **Cost control**: EC2 bills per-second while *running*. **Stop** (not
+   Terminate) the instance from the EC2 console when you're not actively
+   scraping -- storage-only cost while stopped is roughly $1.60/month for
+   20GB. Terminate deletes the disk permanently; only do that when the
+   whole project is done.
+
 ## Setup
 
 ```bash
@@ -46,24 +78,55 @@ maintenance note at the top of that file).
 
 ## Using Webshare (do this before spending on DataImpulse)
 
-`PROXY_PROVIDER=webshare` in `.env` is the default. Webshare gives a
-permanent free tier -- 10 proxies and 1GB of residential bandwidth per
-month, no card required -- which is enough to run the pipeline against
-real Google Maps traffic and shake out selector/config bugs at zero cost,
-before spending the $5 DataImpulse credit on the real pilot.
+`PROXY_PROVIDER=webshare` in `.env` is the default. Webshare's Free plan
+gives 10 static proxy IPs and 1GB of bandwidth per month, no card
+required -- enough to run the pipeline against real Google Maps traffic
+and shake out selector/config bugs at zero cost, before spending the $5
+DataImpulse credit on the real pilot.
+
+**Important, and easy to get wrong (we did, the first time through this):**
+the Free plan is 10 fixed IPs you connect to **directly** -- there is no
+shared gateway domain the way DataImpulse has one, and no per-request
+country targeting. `src/proxy.py`'s `provider="webshare"` path reflects
+this: each concurrent slot is pinned to one of the IPs you provide, all
+sharing one username/password.
 
 1. **Sign up**: [webshare.io](https://www.webshare.io) -> free plan, no
    payment method needed.
-2. **Get proxy credentials**: Dashboard -> Proxy -> Connection tab. Use the
-   **Proxy Username / Proxy Password** shown there -- NOT your account
-   login email/password, those are different credentials.
-3. **Fill in `.env`**:
+2. **Whitelist your server's IP** (required, or every request gets a 407):
+   Dashboard -> **Free -> Proxy Settings -> IP Authorizations** -> Add New
+   IP Address. Get the IP to add by running this *on the server*, not your
+   laptop:
+   ```bash
+   curl -s https://ipv4.webshare.io/
+   ```
+   The Free plan supports exactly 1 authorized IP. If you stop/restart the
+   EC2 instance without an Elastic IP, its public IP changes and you'll
+   need to re-whitelist -- see "Elastic IP" note in the EC2 setup steps.
+3. **Grab the proxy list**: Dashboard -> **Free -> Proxy List**. Copy a
+   handful of rows' `Proxy Address` + `Port` columns (the `Username` /
+   `Password` columns are the same value on every row -- copy that once).
+4. **Fill in `.env`**:
    ```
    PROXY_PROVIDER=webshare
-   WEBSHARE_USERNAME=<proxy username from the dashboard>
-   WEBSHARE_PASSWORD=<proxy password from the dashboard>
+   WEBSHARE_PROXIES=31.59.20.176:6754,31.56.127.193:7684,45.38.107.97:6014
+   WEBSHARE_USERNAME=<the shared Username column value>
+   WEBSHARE_PASSWORD=<the shared Password column value>
    ```
-4. **Run a small test** to confirm the scraper actually extracts fields
+   Paste in at least as many `host:port` pairs as `proxy.concurrent_sessions`
+   in `config/settings.yaml` (default 8) -- fewer than that and multiple
+   concurrent slots will end up sharing the same static IP, which is fine
+   functionally but defeats the point of running concurrently.
+5. **Verify the proxy actually works before trusting it to Playwright** --
+   pick one row and test with curl:
+   ```bash
+   curl -v --max-time 15 -x "http://${WEBSHARE_USERNAME}:${WEBSHARE_PASSWORD}@31.59.20.176:6754" https://ipinfo.io
+   ```
+   Expect `HTTP/1.1 200` and a JSON body with an `ip` field. A `407` means
+   either the IP isn't whitelisted yet (step 2) or the credentials are
+   wrong; anything that just hangs/times out usually also traces back to
+   the IP whitelist.
+6. **Run a small test** to confirm the scraper actually extracts fields
    correctly before trusting it with paid bandwidth:
    ```bash
    python scripts/run_batch.py --city Lagos --categories clinic --pilot-only --max-leads 15
@@ -71,15 +134,15 @@ before spending the $5 DataImpulse credit on the real pilot.
    ```
    Open `output/master.csv` and manually check: are business names, phone
    numbers, and addresses populated and correct? If fields come back empty,
-   that's the Google Maps selector drift mentioned above, not a proxy
+   that's the Google Maps selector drift mentioned earlier, not a proxy
    problem -- fix `src/scraper.py`'s `_extract_detail_fields` before
    spending real money on DataImpulse.
-5. **Watch the free-tier ceiling**: since Webshare's tier is free rather
+7. **Watch the free-tier ceiling**: since Webshare's tier is free rather
    than metered, `src/cost_tracker.py` tracks it as a hard *bandwidth* cap
    (`cost.webshare_free_tier_mb` in `config/settings.yaml`, default 950MB
    -- just under the real 1GB limit) rather than a dollar cap. It raises
    the same `CostCeilingExceeded` and pauses the run if you approach it.
-6. **Switch to DataImpulse** once you're confident the scraper works:
+8. **Switch to DataImpulse** once you're confident the scraper works:
    ```
    PROXY_PROVIDER=dataimpulse
    DATAIMPULSE_USERNAME=<from dataimpulse.com dashboard>
@@ -87,11 +150,12 @@ before spending the $5 DataImpulse credit on the real pilot.
    ```
    then run `scripts/run_pilot.py` for the real, spec-scoped pilot.
 
-Webshare's residential pool is smaller/lower-quality than DataImpulse's at
-this tier, so don't be surprised if you see a higher CAPTCHA/error rate on
-Webshare than on DataImpulse -- that's expected and is exactly why it's
-positioned here as a free debugging step, not a permanent replacement for
-the paid pilot.
+Webshare's free-tier proxies are general-purpose, not necessarily
+residential, and not Nigeria-specific (your 10 IPs could land in any
+country) -- so expect a higher CAPTCHA/block rate on Webshare than on
+DataImpulse's real residential pool. That's expected and is exactly why
+it's positioned here as a free mechanical-correctness check, not a
+permanent replacement for the paid pilot.
 
 ## Running the pilot (do this first)
 

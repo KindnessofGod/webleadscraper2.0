@@ -18,7 +18,6 @@ from src.dedup import dedup_leads, normalize_name
 from src.grid import GridCell, cells_for_grid_config
 from src.niche import normalize_niche
 from src.phone import is_valid_nigerian_phone, normalize_phone
-from src.proxy import ProxyPool
 from src.qualify_tier1 import TIER1_PASS, qualify_tier1
 from src.qualify_tier2 import TIER2_PENDING_QUOTA, Tier2QuotaExhausted, qualify_tier2
 from src.scoring import score_lead, score_tier
@@ -56,24 +55,23 @@ class Pipeline:
         )
         cost.check_ceiling()  # refuse to even start a run that's already over budget
 
-        proxy_host, proxy_username, proxy_password = self.cfg.active_proxy_credentials()
-        pool = ProxyPool(
-            provider=self.cfg.proxy_provider,
-            host=proxy_host,
-            base_username=proxy_username,
-            password=proxy_password,
-            country=self.cfg.get("proxy", "country", default="ng"),
-            concurrent_sessions=self.cfg.get("proxy", "concurrent_sessions", default=8),
+        concurrency = self.cfg.get("proxy", "concurrent_sessions", default=8)
+        pool = self.cfg.build_proxy_pool(
+            concurrent_sessions=concurrency,
             sticky_minutes=self.cfg.get("proxy", "session_sticky_minutes", default=10),
+            country=self.cfg.get("proxy", "country", default="ng"),
         )
-        logger.info("proxy_provider_active run=%s provider=%s host=%s", self.run_id, self.cfg.proxy_provider, proxy_host)
+        logger.info(
+            "proxy_provider_active run=%s provider=%s slots=%d",
+            self.run_id, self.cfg.proxy_provider,
+            len(pool.static_proxies) if self.cfg.proxy_provider == "webshare" else concurrency,
+        )
 
         delay_min = self.cfg.get("pacing", "delay_min_seconds", default=2)
         delay_max = self.cfg.get("pacing", "delay_max_seconds", default=8)
         max_retries = self.cfg.get("pacing", "max_retries", default=3)
         backoff_base = self.cfg.get("pacing", "retry_backoff_base_seconds", default=3)
         captcha_cooldown = self.cfg.get("pacing", "captcha_cooldown_minutes", default=15)
-        concurrency = self.cfg.get("proxy", "concurrent_sessions", default=8)
 
         semaphore = asyncio.Semaphore(concurrency)
         leads_captured = 0
