@@ -78,6 +78,14 @@ CHROMIUM_LAUNCH_ARGS = [
     # Chromium's renderer processes hang or crash under load without this,
     # especially on JS-heavy pages like Google Maps under concurrency.
     "--disable-dev-shm-usage",
+    # Google advertises HTTP/3 (QUIC, over UDP) via the alt-svc header.
+    # Chromium will try to use it for a page's sub-resource requests; a
+    # CONNECT-based HTTP proxy only tunnels TCP and can't forward QUIC at
+    # all, so those attempts hang silently and block domcontentloaded --
+    # this is what caused every navigation to time out even though the
+    # proxy itself worked fine (plain curl never attempts QUIC). Forcing
+    # TCP-only HTTP/2 avoids that.
+    "--disable-quic",
 ]
 
 
