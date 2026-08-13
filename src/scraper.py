@@ -22,7 +22,7 @@ from typing import Optional
 from playwright.async_api import Browser, Page, Playwright, Response, TimeoutError as PWTimeoutError
 
 from src.grid import GridCell
-from src.proxy import ProxySession
+from src.proxy import ProxyPool, ProxySession
 
 logger = logging.getLogger("pipeline.scraper")
 
@@ -309,28 +309,41 @@ async def scrape_grid_cell_with_retry(
     browser: Browser,
     cell: GridCell,
     query: str,
-    proxy_session: ProxySession,
+    pool: ProxyPool,
+    slot: int,
     zoom: int,
     delay_min: float,
     delay_max: float,
     max_retries: int,
     backoff_base: float,
-) -> CellScrapeResult:
+) -> tuple[CellScrapeResult, ProxySession]:
+    """Retries a grid cell on navigation failure, rotating to a fresh proxy
+    exit IP on each retry rather than reusing the same one. Google Maps can
+    silently black-hole (never respond, no captcha page -- indistinguishable
+    from a network hang) requests from an individual exit IP it doesn't like,
+    even when the same proxy/credentials work fine elsewhere; retrying the
+    identical IP would just fail the same way every time, so a genuine
+    navigation failure is treated as a signal to burn that IP and try again
+    on a new one. Returns the last session actually used, for logging.
+    """
     last_error: Optional[Exception] = None
+    session = pool.get(slot)
     for attempt in range(max_retries + 1):
         try:
-            result = await scrape_grid_cell(browser, cell, query, proxy_session, zoom, delay_min, delay_max)
+            result = await scrape_grid_cell(browser, cell, query, session, zoom, delay_min, delay_max)
             result.retry_count = attempt
-            if result.outcome == "captcha":
-                return result  # caller handles session cooldown; retrying won't help
-            return result
+            return result, session
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             if attempt < max_retries:
                 backoff = backoff_base * (2 ** attempt)
-                logger.warning("scrape_retry cell=%s attempt=%d backoff=%.1fs err=%s", cell.id, attempt, backoff, exc)
+                logger.warning(
+                    "scrape_retry cell=%s attempt=%d backoff=%.1fs err=%s -- rotating proxy exit IP",
+                    cell.id, attempt, backoff, exc,
+                )
                 await asyncio.sleep(backoff)
+                session = pool.rotate(slot)
             else:
                 logger.error("scrape_failed_permanently cell=%s err=%s", cell.id, exc)
 
-    return CellScrapeResult(outcome="error", error_detail=str(last_error), retry_count=max_retries)
+    return CellScrapeResult(outcome="error", error_detail=str(last_error), retry_count=max_retries), session

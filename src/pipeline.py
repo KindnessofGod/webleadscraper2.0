@@ -91,10 +91,9 @@ class Pipeline:
 
                     async def run_one(cell: GridCell, slot: int):
                         async with semaphore:
-                            session = pool.get(slot)
                             db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "in_progress")
-                            result = await scrape_grid_cell_with_retry(
-                                browser, cell, category, session, zoom, delay_min, delay_max, max_retries, backoff_base
+                            result, session = await scrape_grid_cell_with_retry(
+                                browser, cell, category, pool, slot, zoom, delay_min, delay_max, max_retries, backoff_base
                             )
                             return cell, session, slot, result
 
