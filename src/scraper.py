@@ -95,8 +95,21 @@ async def launch_browser(pw: Playwright) -> Browser:
     grid cell spawning its own browser process (which is what made 8
     concurrent cells launch 8 full Chromium processes and starve a
     t3.small's 2GB RAM).
+
+    The `proxy={"server": "per-context"}` placeholder is required for
+    Chromium to honor a *per-context* proxy at all -- without a proxy set
+    at browser-launch time, Chromium's network/proxy-resolver service never
+    properly initializes for later per-context overrides, and requests
+    just hang indefinitely instead of failing cleanly (this is what caused
+    100% navigation timeouts even though curl proved the proxy itself,
+    credentials, and sticky-port scheme all worked). See Playwright docs on
+    `browser.newContext(proxy=...)`.
     """
-    return await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
+    return await pw.chromium.launch(
+        headless=True,
+        args=CHROMIUM_LAUNCH_ARGS,
+        proxy={"server": "per-context"},
+    )
 
 
 class _ByteCounter:
