@@ -1,0 +1,69 @@
+# Pilot search categories: the query text used against Google Maps.
+# Each maps to a default niche (used if the scraped Google category string
+# doesn't match anything in niche_map below).
+pilot_categories:
+  - query: clinic
+    default_niche: healthcare
+  - query: law firm
+    default_niche: legal
+  - query: real estate agency
+    default_niche: real_estate
+  - query: school
+    default_niche: education
+
+# Controlled niche vocabulary and their scoring weight (Stage D, 0-100 scale
+# contribution). Higher = more likely to afford/need a 150k-250k naira site.
+niche_weights:
+  healthcare: 30
+  legal: 30
+  real_estate: 28
+  education: 22
+  logistics: 20
+  event_planning: 15
+  retail_boutique: 10
+  other: 5
+
+# Raw Google Maps category strings -> normalized niche. Matching is
+# case-insensitive substring match against this key list, checked in order.
+# Add to this as pilot data reveals more raw category strings.
+niche_map:
+  # healthcare
+  "medical clinic": healthcare
+  "clinic": healthcare
+  "hospital": healthcare
+  "dental clinic": healthcare
+  "dentist": healthcare
+  "doctor": healthcare
+  "pharmacy": healthcare
+  "diagnostic center": healthcare
+  # legal
+  "law firm": legal
+  "lawyer": legal
+  "attorney": legal
+  "legal services": legal
+  # real estate
+  "real estate agency": real_estate
+  "real estate agent": real_estate
+  "property management": real_estate
+  "estate surveyor": real_estate
+  # education
+  "school": education
+  "nursery school": education
+  "primary school": education
+  "secondary school": education
+  "college": education
+  "tutoring service": education
+  # event planning
+  "event planning": event_planning
+  "event planner": event_planning
+  "wedding planner": event_planning
+  "caterer": event_planning
+  # logistics
+  "courier service": logistics
+  "logistics service": logistics
+  "delivery service": logistics
+  "shipping company": logistics
+  # retail
+  "boutique": retail_boutique
+  "clothing store": retail_boutique
+  "fashion accessories store": retail_boutique

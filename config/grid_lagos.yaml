@@ -1,0 +1,28 @@
+# Grid-search cells for Lagos, Stage A (see src/grid.py for cell generation).
+# Dense commercial zones get smaller cells (more, smaller queries -> better
+# coverage under the ~200-result Maps cap). Sparser zones get larger cells.
+# `pilot: true` zones are the ones scripts/run_pilot.py restricts itself to
+# (Section 4 of the spec: "2-3 grid cells").
+city: Lagos
+zoom: 16
+zones:
+  - name: victoria_island
+    bbox: {min_lat: 6.418, max_lat: 6.445, min_lon: 3.401, max_lon: 3.435}
+    cell_km: 1.0
+    pilot: true
+  - name: ikeja
+    bbox: {min_lat: 6.565, max_lat: 6.615, min_lon: 3.320, max_lon: 3.370}
+    cell_km: 1.0
+    pilot: true
+  - name: lekki_phase1
+    bbox: {min_lat: 6.430, max_lat: 6.460, min_lon: 3.460, max_lon: 3.500}
+    cell_km: 1.5
+    pilot: false
+  - name: surulere
+    bbox: {min_lat: 6.480, max_lat: 6.510, min_lon: 3.340, max_lon: 3.370}
+    cell_km: 1.5
+    pilot: false
+  - name: ikorodu
+    bbox: {min_lat: 6.590, max_lat: 6.650, min_lon: 3.480, max_lon: 3.550}
+    cell_km: 3.0
+    pilot: false
