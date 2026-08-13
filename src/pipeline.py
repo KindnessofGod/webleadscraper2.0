@@ -11,6 +11,8 @@ import time
 from dataclasses import asdict
 from typing import Optional
 
+from playwright.async_api import async_playwright
+
 from src import db
 from src.config import Config
 from src.cost_tracker import CostCeilingExceeded, CostTracker
@@ -21,7 +23,7 @@ from src.phone import is_valid_nigerian_phone, normalize_phone
 from src.qualify_tier1 import TIER1_PASS, qualify_tier1
 from src.qualify_tier2 import TIER2_PENDING_QUOTA, Tier2QuotaExhausted, qualify_tier2
 from src.scoring import score_lead, score_tier
-from src.scraper import scrape_grid_cell_with_retry
+from src.scraper import launch_browser, scrape_grid_cell_with_retry
 
 logger = logging.getLogger("pipeline.orchestrator")
 
@@ -77,81 +79,86 @@ class Pipeline:
         leads_captured = 0
         stop = False
 
-        for category in categories:
-            if stop:
-                break
-            pending = db.pending_cells(self.conn, self.run_id, category, [c.id for c in cells])
-            pending_cells = [c for c in cells if c.id in pending]
-            logger.info("category_start run=%s category=%s pending_cells=%d", self.run_id, category, len(pending_cells))
+        async with async_playwright() as pw:
+            browser = await launch_browser(pw)
+            try:
+                for category in categories:
+                    if stop:
+                        break
+                    pending = db.pending_cells(self.conn, self.run_id, category, [c.id for c in cells])
+                    pending_cells = [c for c in cells if c.id in pending]
+                    logger.info("category_start run=%s category=%s pending_cells=%d", self.run_id, category, len(pending_cells))
 
-            async def run_one(cell: GridCell, slot: int):
-                async with semaphore:
-                    session = pool.get(slot)
-                    db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "in_progress")
-                    result = await scrape_grid_cell_with_retry(
-                        cell, category, session, zoom, delay_min, delay_max, max_retries, backoff_base
-                    )
-                    return cell, session, slot, result
+                    async def run_one(cell: GridCell, slot: int):
+                        async with semaphore:
+                            session = pool.get(slot)
+                            db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "in_progress")
+                            result = await scrape_grid_cell_with_retry(
+                                browser, cell, category, session, zoom, delay_min, delay_max, max_retries, backoff_base
+                            )
+                            return cell, session, slot, result
 
-            tasks = [asyncio.ensure_future(run_one(cell, i % concurrency)) for i, cell in enumerate(pending_cells)]
-            for coro in asyncio.as_completed(tasks):
-                cell, session, slot, result = await coro
+                    tasks = [asyncio.ensure_future(run_one(cell, i % concurrency)) for i, cell in enumerate(pending_cells)]
+                    for coro in asyncio.as_completed(tasks):
+                        cell, session, slot, result = await coro
 
-                db.log_request(
-                    self.conn, run_id=self.run_id, stage="scrape", grid_cell_id=cell.id, query=category,
-                    proxy_session_id=session.session_id, http_status=result.http_status,
-                    retry_count=result.retry_count, outcome=result.outcome, error_detail=result.error_detail,
-                    bytes_used=result.bytes_used,
-                )
+                        db.log_request(
+                            self.conn, run_id=self.run_id, stage="scrape", grid_cell_id=cell.id, query=category,
+                            proxy_session_id=session.session_id, http_status=result.http_status,
+                            retry_count=result.retry_count, outcome=result.outcome, error_detail=result.error_detail,
+                            bytes_used=result.bytes_used,
+                        )
 
-                try:
-                    cost.record(result.bytes_used, batch_id=cell.id, note=f"{category}/{cell.id}")
-                except CostCeilingExceeded as exc:
-                    logger.error("cost_ceiling_hit run=%s %s", self.run_id, exc)
-                    db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "done", len(result.leads))
-                    db.finish_run(self.conn, self.run_id, "paused_cost_ceiling")
-                    stop = True
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
-                    break
+                        try:
+                            cost.record(result.bytes_used, batch_id=cell.id, note=f"{category}/{cell.id}")
+                        except CostCeilingExceeded as exc:
+                            logger.error("cost_ceiling_hit run=%s %s", self.run_id, exc)
+                            db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "done", len(result.leads))
+                            db.finish_run(self.conn, self.run_id, "paused_cost_ceiling")
+                            stop = True
+                            for t in tasks:
+                                if not t.done():
+                                    t.cancel()
+                            break
 
-                if result.outcome == "captcha":
-                    pool.cooldown(slot, captcha_cooldown)
-                    db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "error", 0, "captcha_detected")
-                    logger.warning("captcha_cooldown run=%s cell=%s slot=%d minutes=%d", self.run_id, cell.id, slot, captcha_cooldown)
-                    continue
+                        if result.outcome == "captcha":
+                            pool.cooldown(slot, captcha_cooldown)
+                            db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "error", 0, "captcha_detected")
+                            logger.warning("captcha_cooldown run=%s cell=%s slot=%d minutes=%d", self.run_id, cell.id, slot, captcha_cooldown)
+                            continue
 
-                if result.outcome == "error":
-                    db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "error", 0, result.error_detail)
-                    continue
+                        if result.outcome == "error":
+                            db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "error", 0, result.error_detail)
+                            continue
 
-                for lead in result.leads:
-                    row = asdict(lead)
-                    row.update(
-                        run_id=self.run_id, source_query=category, grid_cell_id=cell.id, city=city,
-                        scraped_at=time.time(), normalized_name=normalize_name(lead.business_name),
-                        permanently_closed=int(lead.permanently_closed),
-                    )
-                    db.insert_lead(self.conn, row)
-                    leads_captured += 1
+                        for lead in result.leads:
+                            row = asdict(lead)
+                            row.update(
+                                run_id=self.run_id, source_query=category, grid_cell_id=cell.id, city=city,
+                                scraped_at=time.time(), normalized_name=normalize_name(lead.business_name),
+                                permanently_closed=int(lead.permanently_closed),
+                            )
+                            db.insert_lead(self.conn, row)
+                            leads_captured += 1
 
-                db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "done", len(result.leads))
-                logger.info(
-                    "cell_done run=%s category=%s cell=%s outcome=%s leads=%d cost_status=%s",
-                    self.run_id, category, cell.id, result.outcome, len(result.leads), cost.status(),
-                )
+                        db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "done", len(result.leads))
+                        logger.info(
+                            "cell_done run=%s category=%s cell=%s outcome=%s leads=%d cost_status=%s",
+                            self.run_id, category, cell.id, result.outcome, len(result.leads), cost.status(),
+                        )
 
-                if max_leads and leads_captured >= max_leads:
-                    logger.info("max_leads_reached run=%s leads=%d", self.run_id, leads_captured)
-                    stop = True
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
-                    break
+                        if max_leads and leads_captured >= max_leads:
+                            logger.info("max_leads_reached run=%s leads=%d", self.run_id, leads_captured)
+                            stop = True
+                            for t in tasks:
+                                if not t.done():
+                                    t.cancel()
+                            break
 
-            if stop:
-                break
+                    if stop:
+                        break
+            finally:
+                await browser.close()
 
         if not stop:
             db.finish_run(self.conn, self.run_id, "completed")

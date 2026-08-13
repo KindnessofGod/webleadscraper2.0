@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from playwright.async_api import Page, Response, TimeoutError as PWTimeoutError, async_playwright
+from playwright.async_api import Browser, Page, Playwright, Response, TimeoutError as PWTimeoutError
 
 from src.grid import GridCell
 from src.proxy import ProxySession
@@ -71,6 +71,24 @@ class CellScrapeResult:
 def _looks_like_captcha(html: str) -> bool:
     lowered = html.lower()
     return any(marker in lowered for marker in CAPTCHA_MARKERS)
+
+
+CHROMIUM_LAUNCH_ARGS = [
+    # /dev/shm defaults to a small size on most cloud VMs (EC2 included);
+    # Chromium's renderer processes hang or crash under load without this,
+    # especially on JS-heavy pages like Google Maps under concurrency.
+    "--disable-dev-shm-usage",
+]
+
+
+async def launch_browser(pw: Playwright) -> Browser:
+    """One Chromium *process* shared for the whole scrape run -- callers
+    open one lightweight context per grid cell against it rather than each
+    grid cell spawning its own browser process (which is what made 8
+    concurrent cells launch 8 full Chromium processes and starve a
+    t3.small's 2GB RAM).
+    """
+    return await pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
 
 
 class _ByteCounter:
@@ -149,6 +167,7 @@ async def _extract_detail_fields(page: Page) -> dict:
 
 
 async def scrape_grid_cell(
+    browser: Browser,
     cell: GridCell,
     query: str,
     proxy_session: ProxySession,
@@ -161,98 +180,96 @@ async def scrape_grid_cell(
     url = cell.maps_search_url(query, zoom)
     counter = _ByteCounter()
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context(
-            proxy=proxy_session.playwright_proxy(),
-            locale="en-US",
-            viewport={"width": 1280, "height": 900},
-        )
+    context = await browser.new_context(
+        proxy=proxy_session.playwright_proxy(),
+        locale="en-US",
+        viewport={"width": 1280, "height": 900},
+    )
+    try:
         page = await context.new_page()
         page.on("response", counter.on_response)
         page.set_default_navigation_timeout(nav_timeout_ms)
 
+        resp = await page.goto(url, wait_until="domcontentloaded")
+        result.http_status = resp.status if resp else None
+
+        html = await page.content()
+        if _looks_like_captcha(html):
+            result.outcome = "captcha"
+            raise CaptchaDetected(f"captcha marker on grid cell {cell.id}")
+
         try:
-            resp = await page.goto(url, wait_until="domcontentloaded")
-            result.http_status = resp.status if resp else None
+            await page.wait_for_selector(RESULTS_FEED_SELECTOR, timeout=8000)
+        except PWTimeoutError:
+            # Genuinely empty result set for this cell/query -- not an error.
+            result.outcome = "empty"
+            return result
 
-            html = await page.content()
-            if _looks_like_captcha(html):
-                result.outcome = "captcha"
-                raise CaptchaDetected(f"captcha marker on grid cell {cell.id}")
+        # Scroll the results feed to load up to the 200-result cap.
+        feed = page.locator(RESULTS_FEED_SELECTOR)
+        seen_hrefs: set[str] = set()
+        stagnant_scrolls = 0
+        while len(seen_hrefs) < MAX_RESULTS_PER_QUERY and stagnant_scrolls < 4:
+            cards = page.locator('div[role="feed"] a[href*="/maps/place/"]')
+            count = await cards.count()
+            hrefs = set()
+            for i in range(count):
+                href = await cards.nth(i).get_attribute("href")
+                if href:
+                    hrefs.add(href)
+            if len(hrefs) == len(seen_hrefs):
+                stagnant_scrolls += 1
+            else:
+                stagnant_scrolls = 0
+            seen_hrefs = hrefs
+            await feed.evaluate("el => el.scrollBy(0, el.scrollHeight)")
+            await asyncio.sleep(random.uniform(0.8, 1.6))
 
+        if not seen_hrefs:
+            result.outcome = "empty"
+            return result
+
+        for href in list(seen_hrefs)[:MAX_RESULTS_PER_QUERY]:
+            await asyncio.sleep(random.uniform(delay_min, delay_max))
             try:
-                await page.wait_for_selector(RESULTS_FEED_SELECTOR, timeout=8000)
-            except PWTimeoutError:
-                # Genuinely empty result set for this cell/query -- not an error.
-                result.outcome = "empty"
-                return result
+                await page.goto(href, wait_until="domcontentloaded")
+                html = await page.content()
+                if _looks_like_captcha(html):
+                    result.outcome = "captcha"
+                    raise CaptchaDetected(f"captcha marker mid-cell {cell.id}")
 
-            # Scroll the results feed to load up to the 200-result cap.
-            feed = page.locator(RESULTS_FEED_SELECTOR)
-            seen_hrefs: set[str] = set()
-            stagnant_scrolls = 0
-            while len(seen_hrefs) < MAX_RESULTS_PER_QUERY and stagnant_scrolls < 4:
-                cards = page.locator('div[role="feed"] a[href*="/maps/place/"]')
-                count = await cards.count()
-                hrefs = set()
-                for i in range(count):
-                    href = await cards.nth(i).get_attribute("href")
-                    if href:
-                        hrefs.add(href)
-                if len(hrefs) == len(seen_hrefs):
-                    stagnant_scrolls += 1
-                else:
-                    stagnant_scrolls = 0
-                seen_hrefs = hrefs
-                await feed.evaluate("el => el.scrollBy(0, el.scrollHeight)")
-                await asyncio.sleep(random.uniform(0.8, 1.6))
-
-            if not seen_hrefs:
-                result.outcome = "empty"
-                return result
-
-            for href in list(seen_hrefs)[:MAX_RESULTS_PER_QUERY]:
-                await asyncio.sleep(random.uniform(delay_min, delay_max))
-                try:
-                    await page.goto(href, wait_until="domcontentloaded")
-                    html = await page.content()
-                    if _looks_like_captcha(html):
-                        result.outcome = "captcha"
-                        raise CaptchaDetected(f"captcha marker mid-cell {cell.id}")
-
-                    fields = await _extract_detail_fields(page)
-                    if not fields.get("business_name"):
-                        continue
-                    lead = ScrapedLead(
-                        business_name=fields["business_name"],
-                        category_raw=fields.get("category_raw"),
-                        address=fields.get("address"),
-                        phone_raw=fields.get("phone_raw"),
-                        website=fields.get("website"),
-                        maps_url=fields.get("maps_url"),
-                        lat=cell.lat,
-                        lon=cell.lon,
-                        rating=fields.get("rating"),
-                        review_count=fields.get("review_count"),
-                        permanently_closed=fields.get("permanently_closed", False),
-                    )
-                    result.leads.append(lead)
-                except CaptchaDetected:
-                    raise
-                except Exception as exc:  # noqa: BLE001 -- one bad card must not kill the batch
-                    logger.warning("card_extract_failed cell=%s href=%s err=%s", cell.id, href, exc)
+                fields = await _extract_detail_fields(page)
+                if not fields.get("business_name"):
                     continue
+                lead = ScrapedLead(
+                    business_name=fields["business_name"],
+                    category_raw=fields.get("category_raw"),
+                    address=fields.get("address"),
+                    phone_raw=fields.get("phone_raw"),
+                    website=fields.get("website"),
+                    maps_url=fields.get("maps_url"),
+                    lat=cell.lat,
+                    lon=cell.lon,
+                    rating=fields.get("rating"),
+                    review_count=fields.get("review_count"),
+                    permanently_closed=fields.get("permanently_closed", False),
+                )
+                result.leads.append(lead)
+            except CaptchaDetected:
+                raise
+            except Exception as exc:  # noqa: BLE001 -- one bad card must not kill the batch
+                logger.warning("card_extract_failed cell=%s href=%s err=%s", cell.id, href, exc)
+                continue
 
-        finally:
-            result.bytes_used = counter.total
-            await context.close()
-            await browser.close()
+    finally:
+        result.bytes_used = counter.total
+        await context.close()
 
     return result
 
 
 async def scrape_grid_cell_with_retry(
+    browser: Browser,
     cell: GridCell,
     query: str,
     proxy_session: ProxySession,
@@ -265,7 +282,7 @@ async def scrape_grid_cell_with_retry(
     last_error: Optional[Exception] = None
     for attempt in range(max_retries + 1):
         try:
-            result = await scrape_grid_cell(cell, query, proxy_session, zoom, delay_min, delay_max)
+            result = await scrape_grid_cell(browser, cell, query, proxy_session, zoom, delay_min, delay_max)
             result.retry_count = attempt
             if result.outcome == "captcha":
                 return result  # caller handles session cooldown; retrying won't help
