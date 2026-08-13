@@ -13,7 +13,7 @@ below.
 
 | Stage | What it does | File |
 |---|---|---|
-| A | Grid-search Google Maps via Playwright + DataImpulse residential proxy | `src/scraper.py`, `src/grid.py` |
+| A | Grid-search Google Maps via Playwright + a residential proxy (Webshare free tier or DataImpulse paid) | `src/scraper.py`, `src/grid.py`, `src/proxy.py` |
 | B | Free check: does the Maps-listed `website` field actually resolve? | `src/qualify_tier1.py` |
 | C | Cheap check: one live search-API query per remaining lead | `src/qualify_tier2.py` |
 | D | Score niche fit / review signal / rating into hot-warm-cold | `src/scoring.py` |
@@ -32,17 +32,66 @@ pip install -r requirements.txt
 playwright install chromium
 
 cp .env.example .env
-# fill in DATAIMPULSE_USERNAME / DATAIMPULSE_PASSWORD and TIER2_SEARCH_API_KEY
+# fill in WEBSHARE_USERNAME / WEBSHARE_PASSWORD (see below) and TIER2_SEARCH_API_KEY
 ```
 
-**Before running real traffic:** DataImpulse's username-parameter syntax
+**Before running real traffic:** both providers' username-parameter syntax
 for country targeting and sticky sessions (`src/proxy.py`) is implemented
 against their publicly documented format as of this writing. Confirm it
-still matches your dashboard/`docs.dataimpulse.com` first -- getting it
-wrong burns paid bandwidth for nothing. Same caution applies to the Google
+still matches your dashboard first -- getting it wrong burns bandwidth for
+nothing (paid, in DataImpulse's case). Same caution applies to the Google
 Maps DOM selectors in `src/scraper.py`: Maps' markup changes over time, and
 selectors are the most likely thing to need a touch-up (see the
 maintenance note at the top of that file).
+
+## Using Webshare (do this before spending on DataImpulse)
+
+`PROXY_PROVIDER=webshare` in `.env` is the default. Webshare gives a
+permanent free tier -- 10 proxies and 1GB of residential bandwidth per
+month, no card required -- which is enough to run the pipeline against
+real Google Maps traffic and shake out selector/config bugs at zero cost,
+before spending the $5 DataImpulse credit on the real pilot.
+
+1. **Sign up**: [webshare.io](https://www.webshare.io) -> free plan, no
+   payment method needed.
+2. **Get proxy credentials**: Dashboard -> Proxy -> Connection tab. Use the
+   **Proxy Username / Proxy Password** shown there -- NOT your account
+   login email/password, those are different credentials.
+3. **Fill in `.env`**:
+   ```
+   PROXY_PROVIDER=webshare
+   WEBSHARE_USERNAME=<proxy username from the dashboard>
+   WEBSHARE_PASSWORD=<proxy password from the dashboard>
+   ```
+4. **Run a small test** to confirm the scraper actually extracts fields
+   correctly before trusting it with paid bandwidth:
+   ```bash
+   python scripts/run_batch.py --city Lagos --categories clinic --pilot-only --max-leads 15
+   python scripts/export_by_niche.py
+   ```
+   Open `output/master.csv` and manually check: are business names, phone
+   numbers, and addresses populated and correct? If fields come back empty,
+   that's the Google Maps selector drift mentioned above, not a proxy
+   problem -- fix `src/scraper.py`'s `_extract_detail_fields` before
+   spending real money on DataImpulse.
+5. **Watch the free-tier ceiling**: since Webshare's tier is free rather
+   than metered, `src/cost_tracker.py` tracks it as a hard *bandwidth* cap
+   (`cost.webshare_free_tier_mb` in `config/settings.yaml`, default 950MB
+   -- just under the real 1GB limit) rather than a dollar cap. It raises
+   the same `CostCeilingExceeded` and pauses the run if you approach it.
+6. **Switch to DataImpulse** once you're confident the scraper works:
+   ```
+   PROXY_PROVIDER=dataimpulse
+   DATAIMPULSE_USERNAME=<from dataimpulse.com dashboard>
+   DATAIMPULSE_PASSWORD=<from dataimpulse.com dashboard>
+   ```
+   then run `scripts/run_pilot.py` for the real, spec-scoped pilot.
+
+Webshare's residential pool is smaller/lower-quality than DataImpulse's at
+this tier, so don't be surprised if you see a higher CAPTCHA/error rate on
+Webshare than on DataImpulse -- that's expected and is exactly why it's
+positioned here as a free debugging step, not a permanent replacement for
+the paid pilot.
 
 ## Running the pilot (do this first)
 

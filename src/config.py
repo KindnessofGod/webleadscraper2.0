@@ -26,11 +26,19 @@ class Config:
     settings: dict = field(default_factory=lambda: _load_yaml("settings.yaml"))
     categories: dict = field(default_factory=lambda: _load_yaml("categories.yaml"))
 
-    # DataImpulse proxy
+    # Which proxy provider is active: "webshare" (free tier, for debugging
+    # the scraper at zero cost) or "dataimpulse" (paid, for the real pilot).
+    proxy_provider: str = os.getenv("PROXY_PROVIDER", "webshare")
+
+    # DataImpulse proxy ($1/GB pay-as-you-go)
     dataimpulse_host: str = os.getenv("DATAIMPULSE_HOST", "gw.dataimpulse.com")
-    dataimpulse_port: int = int(os.getenv("DATAIMPULSE_PORT", "823"))
     dataimpulse_username: str = os.getenv("DATAIMPULSE_USERNAME", "")
     dataimpulse_password: str = os.getenv("DATAIMPULSE_PASSWORD", "")
+
+    # Webshare proxy (free tier: 10 proxies / 1GB residential per month)
+    webshare_host: str = os.getenv("WEBSHARE_HOST", "p.webshare.io")
+    webshare_username: str = os.getenv("WEBSHARE_USERNAME", "")
+    webshare_password: str = os.getenv("WEBSHARE_PASSWORD", "")
 
     # Tier 2 search API
     tier2_provider: str = os.getenv("TIER2_SEARCH_PROVIDER", "serper")
@@ -46,6 +54,15 @@ class Config:
                 return default
             node = node[k]
         return node
+
+    def active_proxy_credentials(self) -> tuple[str, str, str]:
+        """Returns (host, username, password) for whichever provider
+        PROXY_PROVIDER selects."""
+        if self.proxy_provider == "dataimpulse":
+            return self.dataimpulse_host, self.dataimpulse_username, self.dataimpulse_password
+        if self.proxy_provider == "webshare":
+            return self.webshare_host, self.webshare_username, self.webshare_password
+        raise ValueError(f"unknown PROXY_PROVIDER: {self.proxy_provider!r} (expected 'webshare' or 'dataimpulse')")
 
     def grid_config(self, city: str) -> dict:
         return _load_yaml(f"grid_{city.lower()}.yaml")

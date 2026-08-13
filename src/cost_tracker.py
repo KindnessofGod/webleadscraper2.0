@@ -17,21 +17,37 @@ logger = logging.getLogger("pipeline.cost")
 
 
 class CostCeilingExceeded(Exception):
-    def __init__(self, cumulative_cost_usd: float, ceiling_usd: float):
+    def __init__(self, message: str, cumulative_cost_usd: float, ceiling_usd: float):
         self.cumulative_cost_usd = cumulative_cost_usd
         self.ceiling_usd = ceiling_usd
-        super().__init__(
-            f"Cost ceiling hit: ${cumulative_cost_usd:.4f} spent >= ${ceiling_usd:.2f} ceiling. Pipeline paused."
-        )
+        super().__init__(message)
 
 
 class CostTracker:
-    def __init__(self, conn: sqlite3.Connection, run_id: str, price_usd_per_gb: float, ceiling_usd: float, warn_at_fraction: float = 0.75):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        run_id: str,
+        price_usd_per_gb: float,
+        ceiling_usd: float,
+        warn_at_fraction: float = 0.75,
+        bandwidth_ceiling_bytes: int | None = None,
+    ):
+        """bandwidth_ceiling_bytes is an additional hard stop independent of
+        dollar cost -- for a $0/GB free-tier provider (e.g. Webshare's free
+        1GB/month), price-based ceiling checks are meaningless since cost
+        never accrues, so this catches "about to exceed the free quota"
+        instead. Note cumulative_bytes tracked here is global across
+        whichever provider(s) have been used against this DB, so switching
+        providers mid-project is conservative (may trip slightly early) but
+        never silently permissive.
+        """
         self.conn = conn
         self.run_id = run_id
         self.price_per_byte = price_usd_per_gb / (1024 ** 3)
         self.ceiling_usd = ceiling_usd
         self.warn_at_fraction = warn_at_fraction
+        self.bandwidth_ceiling_bytes = bandwidth_ceiling_bytes
         self._warned = False
         row = conn.execute(
             "SELECT COALESCE(MAX(cumulative_bytes),0) b, COALESCE(MAX(cumulative_cost_usd),0) c FROM cost_ledger"
@@ -41,7 +57,17 @@ class CostTracker:
 
     def check_ceiling(self) -> None:
         if self.cumulative_cost_usd >= self.ceiling_usd:
-            raise CostCeilingExceeded(self.cumulative_cost_usd, self.ceiling_usd)
+            raise CostCeilingExceeded(
+                f"Cost ceiling hit: ${self.cumulative_cost_usd:.4f} spent >= ${self.ceiling_usd:.2f} ceiling. Pipeline paused.",
+                self.cumulative_cost_usd, self.ceiling_usd,
+            )
+        if self.bandwidth_ceiling_bytes is not None and self.cumulative_bytes >= self.bandwidth_ceiling_bytes:
+            used_mb = self.cumulative_bytes / (1024 ** 2)
+            ceiling_mb = self.bandwidth_ceiling_bytes / (1024 ** 2)
+            raise CostCeilingExceeded(
+                f"Bandwidth ceiling hit: {used_mb:.1f}MB used >= {ceiling_mb:.1f}MB free-tier ceiling. Pipeline paused.",
+                self.cumulative_cost_usd, self.ceiling_usd,
+            )
 
     def record(self, bytes_used: int, batch_id: str, note: str = "") -> None:
         """Record bandwidth consumed by a batch, then re-check the ceiling.

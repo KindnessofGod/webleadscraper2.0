@@ -19,6 +19,7 @@ cost:
   pilot_ceiling_usd: 4.50        # hard pause threshold for the $5 pilot tier
   global_ceiling_usd: 4.50       # pipeline refuses to spend past this until raised deliberately
   warn_at_fraction: 0.75          # log a warning once 75% of ceiling is consumed
+  webshare_free_tier_mb: 950      # hard stop below Webshare's 1GB/month free allotment, price_usd_per_gb=0 for that provider
 
 tier1:
   head_request_timeout_seconds: 6

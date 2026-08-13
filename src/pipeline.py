@@ -44,22 +44,29 @@ class Pipeline:
         if not self._resuming:
             db.start_run(self.conn, self.run_id, city, categories, json.dumps(self.cfg.settings))
 
+        is_free_tier = self.cfg.proxy_provider == "webshare"
         cost = CostTracker(
             self.conn, self.run_id,
-            price_usd_per_gb=self.cfg.get("cost", "price_usd_per_gb", default=1.0),
+            price_usd_per_gb=0.0 if is_free_tier else self.cfg.get("cost", "price_usd_per_gb", default=1.0),
             ceiling_usd=self.cfg.get("cost", "global_ceiling_usd", default=4.5),
             warn_at_fraction=self.cfg.get("cost", "warn_at_fraction", default=0.75),
+            bandwidth_ceiling_bytes=(
+                int(self.cfg.get("cost", "webshare_free_tier_mb", default=950) * 1024 * 1024) if is_free_tier else None
+            ),
         )
         cost.check_ceiling()  # refuse to even start a run that's already over budget
 
+        proxy_host, proxy_username, proxy_password = self.cfg.active_proxy_credentials()
         pool = ProxyPool(
-            host=self.cfg.dataimpulse_host,
-            base_username=self.cfg.dataimpulse_username,
-            password=self.cfg.dataimpulse_password,
+            provider=self.cfg.proxy_provider,
+            host=proxy_host,
+            base_username=proxy_username,
+            password=proxy_password,
             country=self.cfg.get("proxy", "country", default="ng"),
             concurrent_sessions=self.cfg.get("proxy", "concurrent_sessions", default=8),
             sticky_minutes=self.cfg.get("proxy", "session_sticky_minutes", default=10),
         )
+        logger.info("proxy_provider_active run=%s provider=%s host=%s", self.run_id, self.cfg.proxy_provider, proxy_host)
 
         delay_min = self.cfg.get("pacing", "delay_min_seconds", default=2)
         delay_max = self.cfg.get("pacing", "delay_max_seconds", default=8)
