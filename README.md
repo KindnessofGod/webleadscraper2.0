@@ -13,7 +13,7 @@ below.
 
 | Stage | What it does | File |
 |---|---|---|
-| A | Grid-search Google Maps via Playwright + a residential proxy (Webshare free tier or DataImpulse paid) | `src/scraper.py`, `src/grid.py`, `src/proxy.py` |
+| A | Grid-search Google Places API for listings (default), or scrape the Maps web UI via Playwright + proxy | `src/places_api.py`, `src/grid.py` / `src/scraper.py`, `src/proxy.py` |
 | B | Free check: does the Maps-listed `website` field actually resolve? | `src/qualify_tier1.py` |
 | C | Cheap check: one live search-API query per remaining lead | `src/qualify_tier2.py` |
 | D | Score niche fit / review signal / rating into hot-warm-cold | `src/scoring.py` |
@@ -61,28 +61,86 @@ required; that's deliberate given the budget.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-playwright install chromium
 
 cp .env.example .env
-# fill in WEBSHARE_USERNAME / WEBSHARE_PASSWORD (see below) and TIER2_SEARCH_API_KEY
+# fill in PLACES_API_KEY (see below) and TIER2_SEARCH_API_KEY
 ```
 
-**Before running real traffic:** both providers' username-parameter syntax
-for country targeting and sticky sessions (`src/proxy.py`) is implemented
-against their publicly documented format as of this writing. Confirm it
-still matches your dashboard first -- getting it wrong burns bandwidth for
-nothing (paid, in DataImpulse's case). Same caution applies to the Google
-Maps DOM selectors in `src/scraper.py`: Maps' markup changes over time, and
-selectors are the most likely thing to need a touch-up (see the
-maintenance note at the top of that file).
+`playwright install chromium` is only needed for `SOURCE_PROVIDER=maps_scrape`.
 
-## Using Webshare (do this before spending on DataImpulse)
+## Google Places API setup (the default, recommended path)
 
-`PROXY_PROVIDER=webshare` in `.env` is the default. Webshare's Free plan
-gives 10 static proxy IPs and 1GB of bandwidth per month, no card
-required -- enough to run the pipeline against real Google Maps traffic
-and shake out selector/config bugs at zero cost, before spending the $5
-DataImpulse credit on the real pilot.
+Stage A uses Google's official Places API rather than scraping the Maps
+web UI. It returns the same fields the scraper extracted from the DOM --
+including `websiteUri`, which *is* the Tier 1 qualification signal -- as
+structured JSON, with no proxy and no browser.
+
+**Why not scrape Maps directly?** Google blocks automated browsers coming
+from commercial proxy ranges, and does it silently: the request never gets
+a response at all, which is indistinguishable from a network hang. This
+reproduced across two proxy providers and five separate residential exit
+IPs, while plain `curl` through the *same* proxy and headless Chromium
+*without* a proxy both succeeded -- i.e. it is the (browser + proxy-range)
+combination Google refuses, and fingerprint tuning does not fix it. The
+scraper path is still in the repo (`SOURCE_PROVIDER=maps_scrape`) for use
+with a proxy pool Google hasn't flagged, but the API is the supported path.
+
+### Getting a key
+
+1. Go to <https://console.cloud.google.com/> and create a project (or pick
+   an existing one).
+2. **APIs & Services -> Library**, search **"Places API (New)"**, click
+   **Enable**. Make sure it's the *(New)* one -- the legacy Places API has
+   a different request format this code does not speak.
+3. **APIs & Services -> Credentials -> Create credentials -> API key**.
+   Copy it.
+4. Enable billing on the project. Google requires a billing account even
+   to use the free monthly allowance; you are not charged until you exceed
+   it.
+5. Restrict the key (**Credentials -> your key -> API restrictions ->
+   Restrict key -> Places API (New)**) so a leaked key can't be used
+   against other services.
+6. Put it in `.env`:
+   ```
+   SOURCE_PROVIDER=places_api
+   PLACES_API_KEY=AIza...
+   ```
+
+### Verify before running the pipeline
+
+```bash
+python scripts/check_places_api.py
+```
+
+Makes exactly one request and prints the businesses it found, marking
+which have no website. A bad key, a not-enabled API, or a billing problem
+surfaces here instead of halfway through a run.
+
+### Cost
+
+Places API bills **per request**, not per GB, with a monthly free
+allowance. One request returns up to 20 places and each grid cell needs at
+most `places_api.max_pages_per_cell` (default 3) requests per category, so
+a pilot lands well inside the free tier. Check current rates and your
+usage in the Cloud console -- and note `places_api.max_requests_per_run`
+in `config/settings.yaml` is a hard stop that pauses the run rather than
+billing past it.
+
+Because the field mask drives the price, `src/places_api.py` requests only
+the fields the pipeline actually consumes. Adding fields to `FIELD_MASK`
+can move the request into a more expensive tier.
+
+## Using Webshare (only for `SOURCE_PROVIDER=maps_scrape`)
+
+> **Note:** Google Maps blocked both providers below at the exit-IP-range
+> level during testing (see "Why not scrape Maps directly?" above). These
+> instructions are kept for completeness and for use with a proxy pool
+> Google has not flagged, but `SOURCE_PROVIDER=places_api` is the path
+> that works.
+
+Webshare's Free plan gives 10 static proxy IPs and 1GB of bandwidth per
+month, no card required -- enough to shake out selector/config bugs at
+zero cost before spending the $5 DataImpulse credit.
 
 **Important, and easy to get wrong (we did, the first time through this):**
 the Free plan is 10 fixed IPs you connect to **directly** -- there is no
@@ -174,8 +232,10 @@ reminder for the two checks that require a human:
 
 1. Spot-check 10-15 "qualified" leads by actually searching their names
    yourself to confirm they don't have a site.
-2. Compare the pipeline's cost estimate against your real DataImpulse
-   dashboard balance (`python scripts/check_cost.py`).
+2. Compare the pipeline's own accounting (`python scripts/check_cost.py`)
+   against real usage -- the Google Cloud console's Places API request
+   count on `places_api`, or your DataImpulse dashboard balance on
+   `maps_scrape`.
 
 **Do not scale past a FAIL verdict.** Fix the underlying issue and re-run.
 
@@ -211,6 +271,12 @@ run it.
 
 ### Cost guardrails
 
+- On `places_api`, billing is **per request**, so the hard stop is
+  `places_api.max_requests_per_run` (default **500**) in
+  `config/settings.yaml`. The run pauses and checkpoints as
+  `paused_request_ceiling` rather than billing past it, and an HTTP 429
+  from Google pauses it as `paused_quota_exhausted`. Response bytes are
+  still recorded to `cost_ledger` so the run's footprint stays visible.
 - Every scraped batch's bandwidth is recorded to `cost_ledger`
   (`src/cost_tracker.py`) immediately after the request, before the next
   one starts.

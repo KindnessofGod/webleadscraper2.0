@@ -26,8 +26,16 @@ class Config:
     settings: dict = field(default_factory=lambda: _load_yaml("settings.yaml"))
     categories: dict = field(default_factory=lambda: _load_yaml("categories.yaml"))
 
+    # Where Stage A gets its raw leads: "places_api" (Google's official
+    # Places API -- no proxy, no bot-detection fight, structured JSON) or
+    # "maps_scrape" (Playwright against the Maps web UI, which Google
+    # blocks from commercial proxy ranges -- see src/places_api.py).
+    source_provider: str = os.getenv("SOURCE_PROVIDER", "places_api")
+    places_api_key: str = os.getenv("PLACES_API_KEY", "")
+
     # Which proxy provider is active: "webshare" (free tier, for debugging
     # the scraper at zero cost) or "dataimpulse" (paid, for the real pilot).
+    # Only used when source_provider="maps_scrape".
     proxy_provider: str = os.getenv("PROXY_PROVIDER", "webshare")
 
     # DataImpulse proxy ($1/GB pay-as-you-go)

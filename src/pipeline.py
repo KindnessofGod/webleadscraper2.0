@@ -13,7 +13,7 @@ from typing import Optional
 
 from playwright.async_api import async_playwright
 
-from src import db
+from src import db, places_api
 from src.config import Config
 from src.cost_tracker import CostCeilingExceeded, CostTracker
 from src.dedup import dedup_leads, normalize_name
@@ -37,6 +37,122 @@ class Pipeline:
 
     # ---------------------------------------------------------- Stage A ---
     async def run_scrape_stage(self, city: str, categories: list[str], pilot_only: bool, max_leads: Optional[int] = None) -> None:
+        if self.cfg.source_provider == "places_api":
+            self._run_places_stage(city, categories, pilot_only, max_leads)
+            return
+        if self.cfg.source_provider != "maps_scrape":
+            raise ValueError(
+                f"unknown SOURCE_PROVIDER: {self.cfg.source_provider!r} (expected 'places_api' or 'maps_scrape')"
+            )
+        await self._run_browser_scrape_stage(city, categories, pilot_only, max_leads)
+
+    def _persist_leads(self, leads: list, city: str, category: str, cell_id: str) -> int:
+        for lead in leads:
+            row = asdict(lead)
+            row.update(
+                run_id=self.run_id, source_query=category, grid_cell_id=cell_id, city=city,
+                scraped_at=time.time(), normalized_name=normalize_name(lead.business_name),
+                permanently_closed=int(lead.permanently_closed),
+            )
+            db.insert_lead(self.conn, row)
+        return len(leads)
+
+    def _run_places_stage(self, city: str, categories: list[str], pilot_only: bool, max_leads: Optional[int]) -> None:
+        """Stage A via Google's Places API -- no browser, no proxy. One
+        request per page of up to 20 results per grid cell per category.
+        """
+        if not self.cfg.places_api_key:
+            raise ValueError("PLACES_API_KEY is empty -- set it in .env (see README 'Google Places API setup')")
+
+        grid_cfg = self.cfg.grid_config(city)
+        cells = cells_for_grid_config(grid_cfg, pilot_only=pilot_only)
+        logger.info(
+            "places_stage_start run=%s city=%s categories=%s cells=%d pilot_only=%s",
+            self.run_id, city, categories, len(cells), pilot_only,
+        )
+
+        if not self._resuming:
+            db.start_run(self.conn, self.run_id, city, categories, json.dumps(self.cfg.settings))
+
+        radius_m = self.cfg.get("places_api", "search_radius_meters", default=1500)
+        max_pages = self.cfg.get("places_api", "max_pages_per_cell", default=3)
+        timeout = self.cfg.get("places_api", "request_timeout_seconds", default=15)
+        max_requests = self.cfg.get("places_api", "max_requests_per_run", default=500)
+
+        # Places API bills per request, not per GB, so the dollar ceiling is
+        # enforced by max_requests below; the ledger still records real
+        # response bytes so the run's footprint stays visible.
+        cost = CostTracker(
+            self.conn, self.run_id, price_usd_per_gb=0.0,
+            ceiling_usd=self.cfg.get("cost", "global_ceiling_usd", default=4.5),
+            warn_at_fraction=self.cfg.get("cost", "warn_at_fraction", default=0.75),
+        )
+
+        leads_captured = 0
+        requests_made = 0
+
+        for category in categories:
+            pending = db.pending_cells(self.conn, self.run_id, category, [c.id for c in cells])
+            pending_cells = [c for c in cells if c.id in pending]
+            logger.info("category_start run=%s category=%s pending_cells=%d", self.run_id, category, len(pending_cells))
+
+            for cell in pending_cells:
+                if requests_made >= max_requests:
+                    logger.error(
+                        "places_request_ceiling_hit run=%s requests=%d >= %d -- pausing run",
+                        self.run_id, requests_made, max_requests,
+                    )
+                    db.finish_run(self.conn, self.run_id, "paused_request_ceiling")
+                    return
+
+                db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "in_progress")
+                query = f"{category} in {cell.zone}, {city}"
+                try:
+                    leads, bytes_used, n_requests = places_api.search_cell(
+                        self.cfg.places_api_key, cell, query, radius_m, max_pages, timeout
+                    )
+                    outcome = "pass" if leads else "empty"
+                    error_detail = None
+                except places_api.PlacesQuotaExhausted as exc:
+                    logger.error("places_quota_exhausted run=%s %s -- pausing run", self.run_id, exc)
+                    db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "error", 0, "quota_exhausted")
+                    db.finish_run(self.conn, self.run_id, "paused_quota_exhausted")
+                    return
+                except places_api.PlacesAPIError as exc:
+                    logger.error("places_request_failed run=%s cell=%s err=%s", self.run_id, cell.id, exc)
+                    db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "error", 0, str(exc))
+                    db.log_request(
+                        self.conn, run_id=self.run_id, stage="places", grid_cell_id=cell.id, query=query,
+                        proxy_session_id=None, http_status=None, retry_count=0,
+                        outcome="error", error_detail=str(exc), bytes_used=0,
+                    )
+                    continue
+
+                requests_made += n_requests
+                db.log_request(
+                    self.conn, run_id=self.run_id, stage="places", grid_cell_id=cell.id, query=query,
+                    proxy_session_id=None, http_status=200, retry_count=0,
+                    outcome=outcome, error_detail=error_detail, bytes_used=bytes_used,
+                )
+                cost.record(bytes_used, batch_id=cell.id, note=f"{category}/{cell.id} ({n_requests} req)")
+
+                leads_captured += self._persist_leads(leads, city, category, cell.id)
+                db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "done", len(leads))
+                logger.info(
+                    "cell_done run=%s category=%s cell=%s leads=%d requests=%d/%d",
+                    self.run_id, category, cell.id, len(leads), requests_made, max_requests,
+                )
+
+                if max_leads and leads_captured >= max_leads:
+                    logger.info("max_leads_reached run=%s leads=%d", self.run_id, leads_captured)
+                    db.finish_run(self.conn, self.run_id, "completed")
+                    logger.info("places_stage_end run=%s leads_captured=%d requests=%d", self.run_id, leads_captured, requests_made)
+                    return
+
+        db.finish_run(self.conn, self.run_id, "completed")
+        logger.info("places_stage_end run=%s leads_captured=%d requests=%d", self.run_id, leads_captured, requests_made)
+
+    async def _run_browser_scrape_stage(self, city: str, categories: list[str], pilot_only: bool, max_leads: Optional[int] = None) -> None:
         grid_cfg = self.cfg.grid_config(city)
         cells = cells_for_grid_config(grid_cfg, pilot_only=pilot_only)
         zoom = grid_cfg.get("zoom", 15)
@@ -130,15 +246,7 @@ class Pipeline:
                             db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "error", 0, result.error_detail)
                             continue
 
-                        for lead in result.leads:
-                            row = asdict(lead)
-                            row.update(
-                                run_id=self.run_id, source_query=category, grid_cell_id=cell.id, city=city,
-                                scraped_at=time.time(), normalized_name=normalize_name(lead.business_name),
-                                permanently_closed=int(lead.permanently_closed),
-                            )
-                            db.insert_lead(self.conn, row)
-                            leads_captured += 1
+                        leads_captured += self._persist_leads(result.leads, city, category, cell.id)
 
                         db.upsert_checkpoint(self.conn, self.run_id, city, category, cell.id, "done", len(result.leads))
                         logger.info(

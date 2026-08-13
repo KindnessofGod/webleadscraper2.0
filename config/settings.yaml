@@ -1,6 +1,15 @@
 # Global pipeline settings. Keep pilot values conservative -- see README "Scaling safely".
 
+places_api:
+  # Used when SOURCE_PROVIDER=places_api (the default). Billed per request
+  # with a monthly free allowance -- one request returns up to 20 places.
+  search_radius_meters: 1500     # should roughly match the grid's cell_km
+  max_pages_per_cell: 3          # 3 pages x 20 = up to 60 results per cell/category
+  request_timeout_seconds: 15
+  max_requests_per_run: 500      # hard stop; raise deliberately after checking console usage
+
 proxy:
+  # Only used when SOURCE_PROVIDER=maps_scrape.
   # DataImpulse residential, country-level targeting (free tier). City-level
   # targeting costs extra -- we filter by search query text instead (see grid configs).
   country: ng
