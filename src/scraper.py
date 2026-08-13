@@ -86,7 +86,22 @@ CHROMIUM_LAUNCH_ARGS = [
     # proxy itself worked fine (plain curl never attempts QUIC). Forcing
     # TCP-only HTTP/2 avoids that.
     "--disable-quic",
+    # Blink sets navigator.webdriver=true by default, which Google Maps'
+    # bot-detection reads and responds to by silently black-holing the
+    # connection (no response, no captcha page -- indistinguishable from a
+    # network hang) rather than serving content. This is what caused every
+    # navigation to time out even after proxy auth, sticky ports, and the
+    # per-context proxy setup were all confirmed working via curl and via
+    # plain non-Google destinations through the same proxy.
+    "--disable-blink-features=AutomationControlled",
 ]
+
+# Default Playwright/Chromium UA string literally contains "HeadlessChrome",
+# an easy bot-detection tell. Use a plain recent desktop Chrome UA instead.
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 async def launch_browser(pw: Playwright) -> Browser:
@@ -205,6 +220,7 @@ async def scrape_grid_cell(
         proxy=proxy_session.playwright_proxy(),
         locale="en-US",
         viewport={"width": 1280, "height": 900},
+        user_agent=DESKTOP_USER_AGENT,
     )
     try:
         page = await context.new_page()

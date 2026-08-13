@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from playwright.async_api import async_playwright
 
 from src.config import load_config
-from src.scraper import launch_browser
+from src.scraper import DESKTOP_USER_AGENT, launch_browser
 
 URL = "https://www.google.com/maps/search/clinic/@6.422505,3.405533,16z"
 
@@ -34,7 +34,9 @@ async def main() -> None:
 
     async with async_playwright() as pw:
         browser = await launch_browser(pw)
-        context = await browser.new_context(proxy=session.playwright_proxy(), locale="en-US")
+        context = await browser.new_context(
+            proxy=session.playwright_proxy(), locale="en-US", user_agent=DESKTOP_USER_AGENT
+        )
         page = await context.new_page()
 
         pending = set()
