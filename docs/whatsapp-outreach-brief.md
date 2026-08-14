@@ -137,19 +137,36 @@ Two objections dominate the export:
 Neither "free consultation" (reads as a pressure trap) nor free work (devalues the
 ₦250k, attracts non-buyers) solves these.
 
-**Offer a free preview of their own site.**
+**Show a finished site in their own category, then offer a custom preview to the
+few who engage.**
 
-- Against credibility: here is working proof, on your business, judge it yourself.
-- Against DIY: *but you didn't build it — and here it is, already done.*
-- It reframes the pitch from *"buy a website"* to *"your website already exists,
-  do you want to keep it?"*
+There are five concept builds, one per niche. Run outreach **one niche at a time**
+so every prospect sees a site built for a business like theirs:
 
-**Why it is affordable at scale:** the Maps scrape already yields business name,
-category, address, phone, hours, rating, review count and photos. A per-niche
-template auto-filled from that data produces a preview at near-zero marginal cost.
+| Niche | Build |
+|---|---|
+| Lounge / bar | sable-house-lagos.vercel.app |
+| Dental & healthcare | dental-bay-ten.vercel.app |
+| Real estate | real-estate-woad-theta.vercel.app |
+| Hotel / shortlet | site-iota-two-75.vercel.app |
+| Automotive | arclane-eta.vercel.app |
 
-**Gate it behind engagement** — only for prospects who reply as humans and qualify
-as the right contact. That is ~20–50/day, not 2,000.
+This costs nothing per lead — one link per campaign, no new builds — and it fixes
+defect 2.5 (the niche-mismatched proof) at the same time.
+
+- Against credibility: a finished, working site they can open on their phone.
+- Against DIY: it visibly is not a 30-minute template.
+
+**Then gate the custom preview behind real engagement.** For a prospect who replies
+as a human and qualifies as the decision-maker, build them a preview of their own
+site and send the link. That is a handful per week, not per day — affordable in
+build time, and it is the strongest close available:
+
+> *"I went ahead and put together a first version for {business} so you can see it
+> rather than take my word for it: {link}. No charge, no obligation."*
+
+Do not attempt a preview per lead. At 2,000 conversations/day that is not buildable,
+and it is not needed — the niche build does the persuading up front.
 
 ---
 
