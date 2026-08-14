@@ -50,20 +50,31 @@ QUERY_KEYS = ("searchString", "searchQuery", "query", "keyword", "categoryName")
 _EMPTY = {"", "null", "none", "n/a", "-", "undefined"}
 
 
+def _is_empty(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and value.strip().lower() in _EMPTY)
+
+
+def _resolve(row: dict, key: str) -> Any:
+    """Look up `key`, treating it as a literal column first and only then as
+    a path. CSV exports carry the flattened key verbatim ("location/lat"),
+    while JSON exports nest it -- both must resolve.
+    """
+    if key in row:
+        return row[key]
+    value: Any = row
+    for part in key.replace("/", ".").split("."):
+        if not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    return value
+
+
 def _get(row: dict, keys: Iterable[str]) -> Any:
     """First non-empty value among `keys`, resolving dotted/slashed paths."""
     for key in keys:
-        value: Any = row
-        for part in key.replace("/", ".").split("."):
-            if not isinstance(value, dict) or part not in value:
-                value = None
-                break
-            value = value[part]
-        if value is None:
-            continue
-        if isinstance(value, str) and value.strip().lower() in _EMPTY:
-            continue
-        return value
+        value = _resolve(row, key)
+        if not _is_empty(value):
+            return value
     return None
 
 
